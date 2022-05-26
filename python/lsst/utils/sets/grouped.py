@@ -21,6 +21,7 @@ from collections import defaultdict
 from typing import (
     AbstractSet,
     Any,
+    Callable,
     Container,
     Generic,
     Hashable,
@@ -39,28 +40,28 @@ _I = TypeVar("_I", bound=Hashable)
 
 class GroupedSet(Generic[_K, _V, _I]):
 
-    __slots__ = ("groups", "_item_cls")
+    __slots__ = ("groups", "_unpack", "_pack")
 
-    def __init__(self, groups: Mapping[_K, AbstractSet[_V]], item_cls: type[_I]):
+    def __init__(
+        self,
+        groups: Mapping[_K, AbstractSet[_V]],
+        pack: Callable[[_K, _V], _I],
+        unpack: Callable[[_I], tuple[_K, _V]],
+    ):
         self.groups = groups
-        self._item_cls = item_cls
+        self._pack = pack
+        self._unpack = unpack
 
     @staticmethod
-    def from_iterable(iterable: Iterable[_I], item_cls: type[_I]) -> GroupedSet[_K, _V, _I]:
-        result = MutableGroupedSet[_K, _V, _I]({}, item_cls)
+    def from_iterable(
+        iterable: Iterable[_I],
+        pack: Callable[[_K, _V], _I],
+        unpack: Callable[[_I], tuple[_K, _V]],
+    ) -> GroupedSet[_K, _V, _I]:
+        result = MutableGroupedSet[_K, _V, _I]({}, pack, unpack)
         for item in iterable:
             result.add(item)
         return result
-
-    def _pack(self, k: _K, v: _V) -> _I:
-        return self._item_cls(k, v)  # type: ignore
-
-    @staticmethod
-    def _unpack(item: _I) -> tuple[_K, _V]:
-        k: _K
-        v: _V
-        (k, v) = item  # type: ignore
-        return k, v
 
     def __contains__(self, item: _I) -> bool:
         k, v = self._unpack(item)
@@ -113,7 +114,7 @@ class GroupedSet(Generic[_K, _V, _I]):
             derived classes, since those can never have any owners that can
             change their contents.
         """
-        return MutableGroupedSet(self.groups, self._item_cls)
+        return MutableGroupedSet(self.groups, self._pack, self._unpack)
 
     def mutable(self) -> MutableGroupedSet[_K, _V, _I]:
         """Return ``self`` if ``self`` is a `MutableGroupedSet`, or a
@@ -124,7 +125,7 @@ class GroupedSet(Generic[_K, _V, _I]):
         mutable : `MutableGroupedSet`
             A mutable set.
         """
-        return MutableGroupedSet(self.groups, self._item_cls)
+        return MutableGroupedSet(self.groups, self._pack, self._unpack)
 
     def frozen(self) -> FrozenGroupedSet[_K, _V, _I]:
         """Return ``self`` if ``self`` is a `FrozenGroupedSet`, or an
@@ -135,7 +136,7 @@ class GroupedSet(Generic[_K, _V, _I]):
         frozen : `FrozenGroupedSet`
             An immutable set.
         """
-        return FrozenGroupedSet(self.groups, self._item_cls)
+        return FrozenGroupedSet(self.groups, self._pack, self._unpack)
 
 
 @final
@@ -145,12 +146,21 @@ class FrozenGroupedSet(GroupedSet[_K, _V, _I]):
 
     groups: Mapping[_K, frozenset[_V]]
 
-    def __init__(self, groups: Mapping[_K, AbstractSet[_V]], item_cls: type[_I]):
-        super().__init__({k: frozenset(v) for k, v in groups.items()}, item_cls)
+    def __init__(
+        self,
+        groups: Mapping[_K, AbstractSet[_V]],
+        pack: Callable[[_K, _V], _I],
+        unpack: Callable[[_I], tuple[_K, _V]],
+    ):
+        super().__init__({k: frozenset(v) for k, v in groups.items()}, pack, unpack)
 
     @staticmethod
-    def from_iterable(iterable: Iterable[_I], item_cls: type[_I]) -> FrozenGroupedSet[_K, _V, _I]:
-        return GroupedSet[_K, _V, _I].from_iterable(iterable, item_cls).frozen()
+    def from_iterable(
+        iterable: Iterable[_I],
+        pack: Callable[[_K, _V], _I],
+        unpack: Callable[[_I], tuple[_K, _V]],
+    ) -> FrozenGroupedSet[_K, _V, _I]:
+        return GroupedSet[_K, _V, _I].from_iterable(iterable, pack, unpack).frozen()
 
     def __getitem__(self, key: _K) -> frozenset[_V]:
         return self.groups[key]
@@ -175,12 +185,21 @@ class MutableGroupedSet(GroupedSet[_K, _V, _I]):
 
     groups: defaultdict[_K, set[_V]]
 
-    def __init__(self, groups: Mapping[_K, AbstractSet[_V]], item_cls: type[_I]):
-        super().__init__(defaultdict(set, {k: set(v) for k, v in groups.items()}), item_cls)
+    def __init__(
+        self,
+        groups: Mapping[_K, AbstractSet[_V]],
+        pack: Callable[[_K, _V], _I],
+        unpack: Callable[[_I], tuple[_K, _V]],
+    ):
+        super().__init__(defaultdict(set, {k: set(v) for k, v in groups.items()}), pack, unpack)
 
     @staticmethod
-    def from_iterable(iterable: Iterable[_I], item_cls: type[_I]) -> MutableGroupedSet[_K, _V, _I]:
-        return GroupedSet[_K, _V, _I].from_iterable(iterable, item_cls).mutable()
+    def from_iterable(
+        iterable: Iterable[_I],
+        pack: Callable[[_K, _V], _I],
+        unpack: Callable[[_I], tuple[_K, _V]],
+    ) -> MutableGroupedSet[_K, _V, _I]:
+        return GroupedSet[_K, _V, _I].from_iterable(iterable, pack, unpack).mutable()
 
     def __getitem__(self, key: _K) -> set[_V]:
         return self.groups[key]
@@ -204,11 +223,14 @@ class MutableGroupedSet(GroupedSet[_K, _V, _I]):
     def intersection_update(self, *others: Iterable[_I]) -> None:
         for other in others:
             if (groups := getattr(other, "groups", None)) is None:
-                groups = GroupedSet[_K, _V, _I].from_iterable(other, self._item_cls).groups
+                groups = GroupedSet[_K, _V, _I].from_iterable(other, self._pack, self._unpack).groups
             for k in self.groups.keys() - groups.keys():
                 del self.groups[k]
             for k in self.groups.keys() & groups.keys():
-                self.groups[k].intersection_update(groups[k])
+                values = self.groups[k]
+                values.intersection_update(groups[k])
+                if not values:
+                    del self.groups[k]
 
     def add(self, item: _I) -> None:
         k, v = self._unpack(item)
